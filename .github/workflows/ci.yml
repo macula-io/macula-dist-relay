@@ -44,11 +44,8 @@ jobs:
       - name: Run eunit
         run: rebar3 eunit
 
-      # NOTE: dist_relay_SUITE (Common Test) is NOT run in CI yet.
-      # It requires the macula SDK's dist_relay_client module, which is
-      # only on main (not yet published to hex). Once SDK v1.4.26 ships
-      # with the client, add `rebar3 ct` here and drop the _checkouts/
-      # override developers use locally.
+      - name: Run Common Test (dist_relay_SUITE)
+        run: rebar3 ct
 
   docker:
     runs-on: ubuntu-latest
