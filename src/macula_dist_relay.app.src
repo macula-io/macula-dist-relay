@@ -1,7 +1,7 @@
 {application, macula_dist_relay, [
     {description, "Specialized QUIC relay for Erlang distribution over Macula mesh"},
     {vsn, "0.1.0"},
-    {registered, [macula_dist_relay_sup, macula_dist_relay_router]},
+    {registered, [macula_dist_relay_sup, macula_dist_relay_router, macula_dist_relay_conn_sup]},
     {mod, {macula_dist_relay_app, []}},
     {applications, [
         kernel,

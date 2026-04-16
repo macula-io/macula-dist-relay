@@ -71,14 +71,8 @@ handle_cast(_Msg, State) ->
 %% New connection accepted
 handle_info({quic, new_conn, Conn, ConnInfo}, #state{listener = Listener} = State) ->
     ?LOG_INFO("[dist_listener] New connection: ~p", [ConnInfo]),
-    complete_handshake(Conn),
+    dispatch_connection(Conn),
     register_accept(Listener),
-    {noreply, State};
-
-%% New stream on an existing connection
-handle_info({quic, new_stream, _Stream, StreamProps}, State) ->
-    ?LOG_INFO("[dist_listener] New stream: ~p", [StreamProps]),
-    %% TODO: dispatch to connection handler for control/tunnel routing
     {noreply, State};
 
 handle_info(Info, State) ->
@@ -101,21 +95,22 @@ register_accept(Listener) ->
             ?LOG_WARNING("[dist_listener] async_accept failed: ~p", [Reason])
     end.
 
-complete_handshake(Conn) ->
+dispatch_connection(Conn) ->
     case macula_quic:handshake(Conn) of
         ok ->
-            accept_streams(Conn);
+            start_conn_handler(Conn);
         {ok, _} ->
-            accept_streams(Conn);
+            start_conn_handler(Conn);
         {error, Reason} ->
             ?LOG_ERROR("[dist_listener] Handshake failed: ~p", [Reason]),
             catch macula_quic:close_connection(Conn)
     end.
 
-accept_streams(Conn) ->
-    case macula_quic:async_accept_stream(Conn, #{}) of
-        ok -> ok;
-        {ok, _} -> ok;
+start_conn_handler(Conn) ->
+    case macula_dist_relay_conn_sup:start_handler(Conn) of
+        {ok, _Pid} ->
+            ok;
         {error, Reason} ->
-            ?LOG_WARNING("[dist_listener] async_accept_stream failed: ~p", [Reason])
+            ?LOG_ERROR("[dist_listener] Failed to start conn handler: ~p", [Reason]),
+            catch macula_quic:close_connection(Conn)
     end.

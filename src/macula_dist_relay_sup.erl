@@ -41,6 +41,13 @@ init(Port) ->
             type => supervisor
         },
         #{
+            id => macula_dist_relay_conn_sup,
+            start => {macula_dist_relay_conn_sup, start_link, []},
+            restart => permanent,
+            shutdown => infinity,
+            type => supervisor
+        },
+        #{
             id => macula_dist_relay_listener,
             start => {macula_dist_relay_listener, start_link, [Port]},
             restart => permanent,
