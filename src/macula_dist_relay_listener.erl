@@ -52,15 +52,15 @@ init(Port) ->
         {peer_bidi_stream_count, 128}
         | TlsOpts
     ],
-    case macula_quic:listen(Port, ListenOpts) of
-        {ok, Listener} ->
-            register_accept(Listener),
-            ?LOG_INFO("[dist_listener] Listening on UDP :~b (ALPN: macula-dist)", [Port]),
-            {ok, #state{listener = Listener, port = Port}};
-        {error, Reason} ->
-            ?LOG_ERROR("[dist_listener] Failed to listen on :~b: ~p", [Port, Reason]),
-            {stop, {listen_failed, Reason}}
-    end.
+    handle_listen_result(macula_quic:listen(Port, ListenOpts), Port).
+
+handle_listen_result({ok, Listener}, Port) ->
+    register_accept(Listener),
+    ?LOG_INFO("[dist_listener] Listening on UDP :~b (ALPN: macula-dist)", [Port]),
+    {ok, #state{listener = Listener, port = Port}};
+handle_listen_result({error, Reason}, Port) ->
+    ?LOG_ERROR("[dist_listener] Failed to listen on :~b: ~p", [Port, Reason]),
+    {stop, {listen_failed, Reason}}.
 
 handle_call(_Msg, _From, State) ->
     {reply, {error, unknown_call}, State}.
@@ -88,29 +88,26 @@ terminate(_Reason, #state{listener = Listener}) ->
 %%====================================================================
 
 register_accept(Listener) ->
-    case macula_quic:async_accept(Listener, #{}) of
-        ok -> ok;
-        {ok, _} -> ok;
-        {error, Reason} ->
-            ?LOG_WARNING("[dist_listener] async_accept failed: ~p", [Reason])
-    end.
+    log_accept_result(macula_quic:async_accept(Listener, #{})).
+
+log_accept_result(ok) -> ok;
+log_accept_result({ok, _}) -> ok;
+log_accept_result({error, Reason}) ->
+    ?LOG_WARNING("[dist_listener] async_accept failed: ~p", [Reason]).
 
 dispatch_connection(Conn) ->
-    case macula_quic:handshake(Conn) of
-        ok ->
-            start_conn_handler(Conn);
-        {ok, _} ->
-            start_conn_handler(Conn);
-        {error, Reason} ->
-            ?LOG_ERROR("[dist_listener] Handshake failed: ~p", [Reason]),
-            catch macula_quic:close_connection(Conn)
-    end.
+    handle_handshake(macula_quic:handshake(Conn), Conn).
+
+handle_handshake(ok, Conn) -> start_conn_handler(Conn);
+handle_handshake({ok, _}, Conn) -> start_conn_handler(Conn);
+handle_handshake({error, Reason}, Conn) ->
+    ?LOG_ERROR("[dist_listener] Handshake failed: ~p", [Reason]),
+    catch macula_quic:close_connection(Conn).
 
 start_conn_handler(Conn) ->
-    case macula_dist_relay_conn_sup:start_handler(Conn) of
-        {ok, _Pid} ->
-            ok;
-        {error, Reason} ->
-            ?LOG_ERROR("[dist_listener] Failed to start conn handler: ~p", [Reason]),
-            catch macula_quic:close_connection(Conn)
-    end.
+    handle_start_result(macula_dist_relay_conn_sup:start_handler(Conn), Conn).
+
+handle_start_result({ok, _Pid}, _Conn) -> ok;
+handle_start_result({error, Reason}, Conn) ->
+    ?LOG_ERROR("[dist_listener] Failed to start conn handler: ~p", [Reason]),
+    catch macula_quic:close_connection(Conn).
