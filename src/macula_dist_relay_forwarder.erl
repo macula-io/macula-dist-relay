@@ -43,8 +43,12 @@ start_link(TunnelId, SourceStream, DestStream) ->
 %%====================================================================
 
 init({TunnelId, SourceStream, DestStream}) ->
-    macula_quic:setopt(SourceStream, active, true),
-    ?LOG_DEBUG("[forwarder] Started for tunnel ~s", [TunnelId]),
+    %% Take ownership of the source stream so {quic, Data, ...} events
+    %% are delivered here. Without controlling_process, data arrives at
+    %% whatever process opened the stream (the conn_handler) instead.
+    ok = macula_quic:controlling_process(SourceStream, self()),
+    ok = macula_quic:setopt(SourceStream, active, true),
+    ?LOG_INFO("[forwarder] Started for tunnel ~s", [TunnelId]),
     {ok, #state{
         tunnel_id = TunnelId,
         source = SourceStream,

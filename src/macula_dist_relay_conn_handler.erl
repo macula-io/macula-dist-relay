@@ -108,10 +108,20 @@ handle_info({quic, Data, Stream, _Flags}, #state{control = Stream, recv_buf = Bu
     State2 = lists:foldl(fun handle_control_msg/2, State, Msgs),
     {noreply, State2#state{recv_buf = Remaining}};
 
-%% Connection/stream lifecycle
-handle_info({quic, peer_send_shutdown, _Stream, _}, State) ->
-    ?LOG_INFO("[conn_handler] Peer shutdown, node=~s", [node_label(State)]),
+%% Control stream died — the node is gone, tear down.
+handle_info({quic, stream_closed, Stream, _}, #state{control = Stream} = State) ->
+    ?LOG_INFO("[conn_handler] Control stream closed, node=~s", [node_label(State)]),
     {stop, normal, State};
+handle_info({quic, peer_send_shutdown, Stream, _}, #state{control = Stream} = State) ->
+    ?LOG_INFO("[conn_handler] Control stream peer shutdown, node=~s", [node_label(State)]),
+    {stop, normal, State};
+
+%% Tunnel stream lifecycle — let forwarders handle their own; we ignore
+%% stream_closed for non-control streams.
+handle_info({quic, stream_closed, _Stream, _}, State) ->
+    {noreply, State};
+handle_info({quic, peer_send_shutdown, _Stream, _}, State) ->
+    {noreply, State};
 
 handle_info({quic, Closed, _Ref, _}, State)
   when Closed =:= closed; Closed =:= shutdown; Closed =:= transport_shutdown ->

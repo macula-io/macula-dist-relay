@@ -45,7 +45,10 @@ start_link(Port) ->
 %%====================================================================
 
 init(Port) ->
-    TlsOpts = macula_tls:quic_server_opts(),
+    %% macula_tls returns ssl-style `certfile'/`keyfile' keys, but
+    %% macula_quic:listen/3 reads `cert'/`key'. Translate here so the
+    %% NIF doesn't get `undefined' as the cert path.
+    TlsOpts = translate_quic_tls_opts(macula_tls:quic_server_opts()),
     ListenOpts = [
         {alpn, ["macula-dist"]},
         {idle_timeout_ms, 120_000},
@@ -53,6 +56,13 @@ init(Port) ->
         | TlsOpts
     ],
     handle_listen_result(macula_quic:listen(Port, ListenOpts), Port).
+
+translate_quic_tls_opts(Opts) ->
+    lists:map(fun rename_cert_key/1, Opts).
+
+rename_cert_key({certfile, V}) -> {cert, V};
+rename_cert_key({keyfile, V}) -> {key, V};
+rename_cert_key(Other) -> Other.
 
 handle_listen_result({ok, Listener}, Port) ->
     register_accept(Listener),
