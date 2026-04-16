@@ -1,0 +1,10 @@
+_build/
+_checkouts/
+.git/
+.github/
+*.beam
+erl_crash.dump
+logs/
+test/
+doc/
+.rebar3/
