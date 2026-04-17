@@ -19,7 +19,7 @@
 -include_lib("kernel/include/logger.hrl").
 
 -export([start_link/0]).
--export([register_node/3, unregister_node/1, lookup_node/1]).
+-export([register_node/3, unregister_node/1, lookup_node/1, lookup_conn/1]).
 -export([register_tunnel/3, unregister_tunnel/1, lookup_tunnel/1]).
 -export([list_nodes/0, list_tunnels/0]).
 -export([init/1, handle_call/3, handle_cast/2, handle_info/2, terminate/2]).
@@ -36,8 +36,8 @@ start_link() ->
     gen_server:start_link({local, ?MODULE}, ?MODULE, [], []).
 
 -spec register_node(binary(), pid(), reference()) -> ok.
-register_node(NodeName, ConnPid, ConnRef) ->
-    gen_server:call(?MODULE, {register_node, NodeName, ConnPid, ConnRef}).
+register_node(NodeName, ConnPid, Conn) ->
+    gen_server:call(?MODULE, {register_node, NodeName, ConnPid, Conn}).
 
 -spec unregister_node(binary()) -> ok.
 unregister_node(NodeName) ->
@@ -45,15 +45,32 @@ unregister_node(NodeName) ->
 
 -spec lookup_node(binary()) -> {ok, pid()} | {error, not_found}.
 lookup_node(NodeName) ->
-    case ets:lookup(?NODES_TAB, NodeName) of
-        [{_, ConnPid, _}] ->
-            case is_process_alive(ConnPid) of
-                true -> {ok, ConnPid};
-                false -> {error, not_found}
-            end;
-        [] ->
-            {error, not_found}
-    end.
+    lookup_alive(ets:lookup(?NODES_TAB, NodeName)).
+
+lookup_alive([{_, ConnPid, _}]) when is_pid(ConnPid) ->
+    case is_process_alive(ConnPid) of
+        true -> {ok, ConnPid};
+        false -> {error, not_found}
+    end;
+lookup_alive(_) ->
+    {error, not_found}.
+
+%% Full lookup — returns both the conn_handler pid and the live QUIC
+%% connection reference so the source handler can open a stream
+%% directly on the target node's connection without synchronously
+%% calling into the target's handler (which deadlocks when both
+%% endpoints open tunnels to each other concurrently).
+-spec lookup_conn(binary()) -> {ok, pid(), reference()} | {error, not_found}.
+lookup_conn(NodeName) ->
+    lookup_conn_alive(ets:lookup(?NODES_TAB, NodeName)).
+
+lookup_conn_alive([{_, ConnPid, Conn}]) when is_pid(ConnPid) ->
+    case is_process_alive(ConnPid) of
+        true  -> {ok, ConnPid, Conn};
+        false -> {error, not_found}
+    end;
+lookup_conn_alive(_) ->
+    {error, not_found}.
 
 -spec register_tunnel(binary(), pid(), pid()) -> ok.
 register_tunnel(TunnelId, SourceStream, DestStream) ->
@@ -87,8 +104,8 @@ init([]) ->
     ets:new(?TUNNELS_TAB, [named_table, public, set, {read_concurrency, true}]),
     {ok, #{}}.
 
-handle_call({register_node, NodeName, ConnPid, ConnRef}, _From, State) ->
-    ets:insert(?NODES_TAB, {NodeName, ConnPid, ConnRef}),
+handle_call({register_node, NodeName, ConnPid, Conn}, _From, State) ->
+    ets:insert(?NODES_TAB, {NodeName, ConnPid, Conn}),
     ?LOG_INFO("[router] Node registered: ~s (~p)", [NodeName, ConnPid]),
     {reply, ok, State};
 

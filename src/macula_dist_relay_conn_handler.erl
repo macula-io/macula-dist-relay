@@ -62,17 +62,6 @@ init(Conn) ->
     accept_stream(Conn),
     {ok, #state{conn = Conn}}.
 
-%% Called by source handler to open a tunnel stream on THIS node's connection.
-%% We write the 32-byte hex tunnel_id prefix so the target node can identify
-%% which tunnel this incoming stream belongs to.
-handle_call({open_tunnel_stream, TunnelId, SourceNode}, _From,
-            #state{conn = Conn, control = Ctrl} = State)
-  when Ctrl =/= undefined ->
-    handle_open_tunnel_stream(open_and_prefix(Conn, TunnelId), TunnelId, SourceNode, State);
-
-handle_call({open_tunnel_stream, _TunnelId, _SourceNode}, _From, State) ->
-    {reply, {error, not_identified}, State};
-
 handle_call(_Msg, _From, State) ->
     {reply, {error, unknown_call}, State}.
 
@@ -145,9 +134,15 @@ unregister_node(Name) -> macula_dist_relay_router:unregister_node(Name).
 %% Control message handling
 %%====================================================================
 
-handle_control_msg(#{type := identify, node_name := Name}, #state{control = Ctrl} = State) ->
+handle_control_msg(#{type := identify, node_name := Name},
+                   #state{control = Ctrl, conn = Conn} = State) ->
     ?LOG_INFO("[conn_handler] Node identified: ~s", [Name]),
-    macula_dist_relay_router:register_node(Name, self(), make_ref()),
+    %% Register the live QUIC connection ref — not a placeholder — so
+    %% other conn handlers can open tunnel streams on this connection
+    %% directly. Without this they would have to gen_server:call back
+    %% into us, which deadlocks if both peers open tunnels to each
+    %% other at the same time.
+    macula_dist_relay_router:register_node(Name, self(), Conn),
     Reply = macula_dist_relay_protocol:encode(#{type => identified, status => ok}),
     macula_quic:send(Ctrl, Reply),
     State#state{node_name = Name};
@@ -155,7 +150,7 @@ handle_control_msg(#{type := identify, node_name := Name}, #state{control = Ctrl
 handle_control_msg(#{type := tunnel_request, target := Target},
                    #state{node_name = Source, conn = SrcConn} = State)
   when Source =/= undefined ->
-    handle_tunnel_lookup(macula_dist_relay_router:lookup_node(Target),
+    handle_tunnel_lookup(macula_dist_relay_router:lookup_conn(Target),
                          Source, SrcConn, Target, State);
 
 handle_control_msg(#{type := tunnel_request}, State) ->
@@ -173,9 +168,9 @@ handle_control_msg(Msg, State) ->
     State.
 
 %% Flat clauses — one per lookup/tunnel-creation outcome.
-handle_tunnel_lookup({ok, TargetPid}, Source, SrcConn, Target, State) ->
+handle_tunnel_lookup({ok, TargetPid, TargetConn}, Source, SrcConn, _Target, State) ->
     TunnelId = generate_tunnel_id(),
-    finalize_tunnel(create_tunnel(TunnelId, Source, SrcConn, Target, TargetPid),
+    finalize_tunnel(create_tunnel(TunnelId, Source, SrcConn, TargetPid, TargetConn),
                     TunnelId, State);
 handle_tunnel_lookup({error, not_found}, _Source, _SrcConn, _Target, State) ->
     reply_tunnel_error(<<"target_not_connected">>, State),
@@ -201,24 +196,33 @@ reply_tunnel_error(Reason, #state{control = Ctrl}) ->
 %% Tunnel creation
 %%====================================================================
 
-%% Open source stream + write tunnel_id prefix, then ask target handler to
-%% do the same, then spawn bidirectional forwarders. Each step pattern-matches
-%% in its own function clause — no nested case.
-create_tunnel(TunnelId, SourceName, SrcConn, _TargetName, TargetPid) ->
-    with_source_stream(open_and_prefix(SrcConn, TunnelId), TunnelId, SourceName, TargetPid).
+%% Open BOTH streams from THIS handler — we have SrcConn (own state) and
+%% TargetConn (from the router's ETS cache of each node's live QUIC conn
+%% ref). Opening the target stream locally avoids synchronously calling
+%% into the target's conn_handler: that call path deadlocks when two
+%% endpoints open tunnels to each other at the same time (each handler
+%% gen_server:call's the other, both block, both time out, both crash).
+%%
+%% After the stream pair is built, we cast `{tunnel_notify, ...}` to the
+%% target handler so it sends the notify frame on its control stream —
+%% no reply needed, no blocking.
+create_tunnel(TunnelId, SourceName, SrcConn, TargetPid, TargetConn) ->
+    with_source_stream(open_and_prefix(SrcConn, TunnelId),
+                       TunnelId, SourceName, TargetPid, TargetConn).
 
-with_source_stream({ok, SrcStream}, TunnelId, SourceName, TargetPid) ->
-    with_target_stream(
-        gen_server:call(TargetPid, {open_tunnel_stream, TunnelId, SourceName}, 5000),
-        TunnelId, SrcStream);
-with_source_stream({error, Reason}, _TunnelId, _SourceName, _TargetPid) ->
+with_source_stream({ok, SrcStream}, TunnelId, SourceName, TargetPid, TargetConn) ->
+    with_target_stream(open_and_prefix(TargetConn, TunnelId),
+                       TunnelId, SourceName, SrcStream, TargetPid);
+with_source_stream({error, Reason}, _TunnelId, _SourceName, _TargetPid, _TargetConn) ->
     {error, {source_stream_failed, Reason}}.
 
-with_target_stream({ok, TargetStream}, TunnelId, SrcStream) ->
+with_target_stream({ok, TargetStream}, TunnelId, SourceName, SrcStream, TargetPid) ->
     start_forwarder_pair(TunnelId, SrcStream, TargetStream),
     macula_dist_relay_router:register_tunnel(TunnelId, SrcStream, TargetStream),
+    %% Non-blocking — target handler just emits a frame on its control stream.
+    gen_server:cast(TargetPid, {tunnel_notify, TunnelId, SourceName}),
     ok;
-with_target_stream({error, Reason}, _TunnelId, SrcStream) ->
+with_target_stream({error, Reason}, _TunnelId, _SourceName, SrcStream, _TargetPid) ->
     catch macula_quic:close_stream(SrcStream),
     {error, {target_stream_failed, Reason}}.
 
@@ -245,13 +249,6 @@ write_prefix(ok, Stream) ->
 write_prefix({error, Reason}, Stream) ->
     catch macula_quic:close_stream(Stream),
     {error, {prefix_write_failed, Reason}}.
-
-%% Handle result of open_and_prefix from the target-side open_tunnel_stream call.
-handle_open_tunnel_stream({ok, Stream}, TunnelId, SourceNode, #state{tunnels = Tunnels} = State) ->
-    gen_server:cast(self(), {tunnel_notify, TunnelId, SourceNode}),
-    {reply, {ok, Stream}, State#state{tunnels = [TunnelId | Tunnels]}};
-handle_open_tunnel_stream({error, _} = Err, _TunnelId, _SourceNode, State) ->
-    {reply, Err, State}.
 
 %%====================================================================
 %% Internal
