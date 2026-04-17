@@ -105,6 +105,7 @@ init([]) ->
     {ok, #{}}.
 
 handle_call({register_node, NodeName, ConnPid, Conn}, _From, State) ->
+    replace_if_stale(NodeName, ConnPid),
     ets:insert(?NODES_TAB, {NodeName, ConnPid, Conn}),
     ?LOG_INFO("[router] Node registered: ~s (~p)", [NodeName, ConnPid]),
     {reply, ok, State};
@@ -143,4 +144,32 @@ handle_info(_Msg, State) ->
     {noreply, State}.
 
 terminate(_Reason, _State) ->
+    ok.
+
+%%====================================================================
+%% Stale-handler replacement on re-identify
+%%====================================================================
+%% When a node reconnects with the same name before its previous
+%% QUIC connection has timed out (hard kill, network flap), the old
+%% conn_handler is still alive and still "owns" the node row. Tell
+%% it to stand down so its terminate/2 closes the QUIC connection —
+%% that cascades stream_closed events to the peer-side forwarders
+%% and ctrl_loops, which fires nodedown on every peer's net_kernel
+%% and flushes the ghost pid out of every `pg' group.
+
+replace_if_stale(NodeName, NewPid) ->
+    kick_existing(ets:lookup(?NODES_TAB, NodeName), NodeName, NewPid).
+
+kick_existing([{_, OldPid, _}], NodeName, NewPid)
+  when is_pid(OldPid), OldPid =/= NewPid ->
+    kick_if_alive(is_process_alive(OldPid), OldPid, NodeName, NewPid);
+kick_existing(_, _NodeName, _NewPid) ->
+    ok.
+
+kick_if_alive(true, OldPid, NodeName, NewPid) ->
+    ?LOG_INFO("[router] Replacing stale handler ~p with ~p for ~s",
+              [OldPid, NewPid, NodeName]),
+    gen_server:cast(OldPid, {replaced_by, NewPid}),
+    ok;
+kick_if_alive(false, _OldPid, _NodeName, _NewPid) ->
     ok.

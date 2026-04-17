@@ -40,7 +40,13 @@
     control      :: reference() | undefined,
     node_name    :: binary() | undefined,
     tunnels = [] :: [binary()],
-    recv_buf = <<>> :: binary()
+    recv_buf = <<>> :: binary(),
+    %% Set when the router has told us a fresh conn_handler has taken
+    %% over our node_name (the peer reconnected while our conn was
+    %% still lingering). In that case `terminate/2` must NOT unregister
+    %% the node from the router — that row now points at the new
+    %% handler, not us.
+    replaced = false :: boolean()
 }).
 
 %%====================================================================
@@ -73,6 +79,16 @@ handle_cast({tunnel_notify, TunnelId, SourceNode}, #state{control = Ctrl} = Stat
     ),
     macula_quic:send(Ctrl, Frame),
     {noreply, State};
+
+%% The router is about to register a fresh conn_handler for our node_name
+%% (the peer reconnected). Stand down: close our QUIC connection so that
+%% downstream forwarders wind up, the peer's ctrl_loops see stream_closed,
+%% and each peer's net_kernel fires nodedown and sweeps the ghost pid out
+%% of every `pg' group. Mark `replaced' so `terminate/2` leaves the
+%% router row alone — it now belongs to the new handler.
+handle_cast({replaced_by, NewPid}, #state{node_name = Name} = State) ->
+    ?LOG_INFO("[conn_handler] Replaced by ~p for ~s — shutting down", [NewPid, Name]),
+    {stop, normal, State#state{replaced = true}};
 
 handle_cast(_Msg, State) ->
     {noreply, State}.
@@ -121,14 +137,20 @@ handle_info(Info, State) ->
     ?LOG_DEBUG("[conn_handler] Unhandled: ~p", [Info]),
     {noreply, State}.
 
-terminate(_Reason, #state{node_name = Name, tunnels = Tunnels, conn = Conn}) ->
+terminate(_Reason, #state{tunnels = Tunnels, conn = Conn} = State) ->
     lists:foreach(fun macula_dist_relay_router:unregister_tunnel/1, Tunnels),
-    unregister_node(Name),
+    maybe_unregister_node(State),
     catch macula_quic:close_connection(Conn),
     ok.
 
-unregister_node(undefined) -> ok;
-unregister_node(Name) -> macula_dist_relay_router:unregister_node(Name).
+%% When `replaced' is true the router row already points at a fresh
+%% conn_handler for the same node_name — don't yank it.
+maybe_unregister_node(#state{replaced = true}) ->
+    ok;
+maybe_unregister_node(#state{node_name = undefined}) ->
+    ok;
+maybe_unregister_node(#state{node_name = Name}) ->
+    macula_dist_relay_router:unregister_node(Name).
 
 %%====================================================================
 %% Control message handling

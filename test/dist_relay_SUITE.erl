@@ -21,10 +21,16 @@
 -include_lib("common_test/include/ct.hrl").
 
 -export([all/0, init_per_suite/1, end_per_suite/1]).
--export([identify_handshake/1, tunnel_roundtrip/1, missing_target/1]).
+-export([identify_handshake/1, tunnel_roundtrip/1, missing_target/1,
+         reidentify_kicks_stale_handler/1]).
 
 -define(RELAY_PORT, 14434).
 -define(RELAY_URL, "127.0.0.1:14434").
+-define(assert_different(A, B),
+        case (A) =:= (B) of
+            true  -> ct:fail({expected_different, A, B});
+            false -> ok
+        end).
 
 %%====================================================================
 %% Common Test callbacks
@@ -34,7 +40,8 @@ all() ->
     [
         identify_handshake,
         tunnel_roundtrip,
-        missing_target
+        missing_target,
+        reidentify_kicks_stale_handler
     ].
 
 init_per_suite(Config) ->
@@ -136,6 +143,66 @@ missing_target(_Config) ->
     {error, {tunnel_error, <<"target_not_connected">>}} =
         macula_dist_relay_client:request_tunnel(Client, <<"ghost@test">>),
     ok = gen_server:stop(Client).
+
+%% @doc Re-identify replaces the stale conn_handler instead of silently
+%% overwriting the ETS row. Simulates a peer that reconnects with the
+%% same -name before the previous QUIC connection has timed out:
+%%
+%%   1. client1 identifies as 'twin@test' — router row points at handler_1
+%%   2. client2 identifies as 'twin@test' — router replaces row with handler_2
+%%      and casts `{replaced_by, handler_2}' to handler_1
+%%   3. handler_1 stops normally without calling unregister_node
+%%   4. router row still contains handler_2 (not wiped by handler_1's terminate)
+reidentify_kicks_stale_handler(_Config) ->
+    Twin = <<"twin@test">>,
+
+    {ok, Client1} = start_client_with_different_name(?RELAY_URL, Twin),
+    ok = wait_for_identified(Client1, 50),
+    {ok, Handler1} = macula_dist_relay_router:lookup_node(Twin),
+
+    {ok, Client2} = start_client_with_different_name(?RELAY_URL, Twin),
+    ok = wait_for_identified(Client2, 50),
+
+    %% Router row now points at handler_2, not handler_1.
+    ok = wait_for_handler_change(Twin, Handler1, 50),
+    {ok, Handler2} = macula_dist_relay_router:lookup_node(Twin),
+    ?assert_different(Handler1, Handler2),
+
+    %% handler_1 has been told to stand down — it should exit normally.
+    ok = wait_for_dead(Handler1, 50),
+
+    %% The new row survives handler_1's terminate/2 — i.e. handler_1
+    %% did NOT call unregister_node on its way out.
+    {ok, Handler2Again} = macula_dist_relay_router:lookup_node(Twin),
+    Handler2Again = Handler2,
+
+    ok = gen_server:stop(Client2),
+    ok = wait_for_router_gone(Twin, 50),
+    %% Client1's gen_server is long-dead (client died when relay closed
+    %% its conn), but stop/1 against a dead pid is harmless.
+    catch gen_server:stop(Client1),
+    ok.
+
+wait_for_handler_change(_Name, _OldPid, 0) ->
+    {error, handler_unchanged};
+wait_for_handler_change(Name, OldPid, N) ->
+    check_handler_changed(macula_dist_relay_router:lookup_node(Name), Name, OldPid, N).
+
+check_handler_changed({ok, NewPid}, _Name, OldPid, _N) when NewPid =/= OldPid ->
+    ok;
+check_handler_changed(_, Name, OldPid, N) ->
+    timer:sleep(50),
+    wait_for_handler_change(Name, OldPid, N - 1).
+
+wait_for_dead(_Pid, 0) ->
+    {error, still_alive};
+wait_for_dead(Pid, N) ->
+    check_dead(erlang:is_process_alive(Pid), Pid, N).
+
+check_dead(false, _Pid, _N) -> ok;
+check_dead(true, Pid, N) ->
+    timer:sleep(50),
+    wait_for_dead(Pid, N - 1).
 
 %%====================================================================
 %% Helpers
