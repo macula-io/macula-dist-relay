@@ -140,7 +140,7 @@ handle_info(Info, State) ->
 terminate(_Reason, #state{tunnels = Tunnels, conn = Conn} = State) ->
     lists:foreach(fun macula_dist_relay_router:unregister_tunnel/1, Tunnels),
     maybe_unregister_node(State),
-    catch macula_quic:close_connection(Conn),
+    try macula_quic:close_connection(Conn) catch _:_ -> ok end,
     ok.
 
 %% When `replaced' is true the router row already points at a fresh
@@ -245,7 +245,7 @@ with_target_stream({ok, TargetStream}, TunnelId, SourceName, SrcStream, TargetPi
     gen_server:cast(TargetPid, {tunnel_notify, TunnelId, SourceName}),
     ok;
 with_target_stream({error, Reason}, _TunnelId, _SourceName, SrcStream, _TargetPid) ->
-    catch macula_quic:close_stream(SrcStream),
+    try macula_quic:close_stream(SrcStream) catch _:_ -> ok end,
     {error, {target_stream_failed, Reason}}.
 
 start_forwarder_pair(TunnelId, SrcStream, TargetStream) ->
@@ -269,7 +269,7 @@ prefix_stream({error, _} = Err, _TunnelId) ->
 write_prefix(ok, Stream) ->
     {ok, Stream};
 write_prefix({error, Reason}, Stream) ->
-    catch macula_quic:close_stream(Stream),
+    try macula_quic:close_stream(Stream) catch _:_ -> ok end,
     {error, {prefix_write_failed, Reason}}.
 
 %%====================================================================

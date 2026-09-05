@@ -180,7 +180,7 @@ reidentify_kicks_stale_handler(_Config) ->
     ok = wait_for_router_gone(Twin, 50),
     %% Client1's gen_server is long-dead (client died when relay closed
     %% its conn), but stop/1 against a dead pid is harmless.
-    catch gen_server:stop(Client1),
+    try gen_server:stop(Client1) catch _:_ -> ok end,
     ok.
 
 wait_for_handler_change(_Name, _OldPid, 0) ->

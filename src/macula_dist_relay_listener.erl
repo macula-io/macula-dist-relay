@@ -90,7 +90,7 @@ handle_info(Info, State) ->
     {noreply, State}.
 
 terminate(_Reason, #state{listener = Listener}) ->
-    catch macula_quic:close(Listener),
+    try macula_quic:close(Listener) catch _:_ -> ok end,
     ok.
 
 %%====================================================================
@@ -112,7 +112,7 @@ handle_handshake(ok, Conn) -> start_conn_handler(Conn);
 handle_handshake({ok, _}, Conn) -> start_conn_handler(Conn);
 handle_handshake({error, Reason}, Conn) ->
     ?LOG_ERROR("[dist_listener] Handshake failed: ~p", [Reason]),
-    catch macula_quic:close_connection(Conn).
+    try macula_quic:close_connection(Conn) catch _:_ -> ok end.
 
 start_conn_handler(Conn) ->
     handle_start_result(macula_dist_relay_conn_sup:start_handler(Conn), Conn).
@@ -120,4 +120,4 @@ start_conn_handler(Conn) ->
 handle_start_result({ok, _Pid}, _Conn) -> ok;
 handle_start_result({error, Reason}, Conn) ->
     ?LOG_ERROR("[dist_listener] Failed to start conn handler: ~p", [Reason]),
-    catch macula_quic:close_connection(Conn).
+    try macula_quic:close_connection(Conn) catch _:_ -> ok end.
