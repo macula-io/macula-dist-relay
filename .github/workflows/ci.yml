@@ -47,9 +47,15 @@ jobs:
       - name: Run Common Test (dist_relay_SUITE)
         run: rebar3 ct
 
+
+  # The release guard. version-root names the directory whose manifest
+  # carries the version this repository publishes; the default is the root.
+  release-guard:
+    name: The release guard
+    uses: macula-io/macula-ci-images/.github/workflows/release-guard.yml@2660ee4ce1c51ce3d2bf14043ebc8a2784065cd9
   docker:
     runs-on: ubuntu-latest
-    needs: build
+    needs: [build, release-guard]
     if: github.event_name == 'push'
     permissions:
       contents: read
